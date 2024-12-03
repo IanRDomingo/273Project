@@ -8,6 +8,7 @@ import numpy as np
 import random
 import argparse
 from tqdm import tqdm
+import csv
 
 
 def set_seed(seed):
@@ -64,7 +65,7 @@ def train(model, iterator, optimizer, criterion, device):
     return epoch_loss / len(iterator), epoch_acc / len(iterator)
 
 
-def evaluate(model, iterator, criterion):
+def test(model, iterator, criterion, device):
     epoch_loss = 0
     epoch_acc = 0
     model.eval()
@@ -84,9 +85,11 @@ def evaluate(model, iterator, criterion):
 def main():
     parser = argparse.ArgumentParser(description='IMDB')
     parser.add_argument("--epochs", required=False, default=100, type=int)
-    parser.add_argument("--lr", required=False, default=1e-3, type=float)
+    parser.add_argument("--lr", required=False, default=1e-4, type=float)
     parser.add_argument("--batchsize", required=False, default=256, type=int)
     parser.add_argument("--seed", required=False, default=42, type=int)
+    parser.add_argument("--csv_output", default="rnn_metrics.csv", type=str)
+    parser.add_argument('--gpu', default='2', type=int)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -96,17 +99,16 @@ def main():
     LABEL = data.LabelField(dtype=torch.float)
 
     train_data, test_data = datasets.IMDB.splits(TEXT, LABEL)
-    train_data, valid_data = train_data.split(split_ratio=0.7)
 
     MAX_VOCAB_SIZE = 25000
     TEXT.build_vocab(train_data, max_size=MAX_VOCAB_SIZE, vectors="glove.6B.100d", unk_init=torch.Tensor.normal_)
     LABEL.build_vocab(train_data)
 
     BATCH_SIZE = args.batchsize
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu')
 
-    train_iterator, valid_iterator, test_iterator = data.BucketIterator.splits(
-        (train_data, valid_data, test_data),
+    train_iterator, test_iterator = data.BucketIterator.splits(
+        (train_data, test_data),
         batch_size=BATCH_SIZE,
         sort_within_batch=True,
         device=device
@@ -136,16 +138,29 @@ def main():
 
     N_EPOCHS = args.epochs
 
-    for epoch in range(N_EPOCHS):
-        start_time = time.time()
-        train_loss, train_acc = train(model, train_iterator, optimizer, criterion, device)
-        valid_loss, valid_acc = evaluate(model, valid_iterator, criterion)
-        end_time = time.time()
-        epoch_mins, epoch_secs = divmod(end_time - start_time, 60)
+    # Initialize CSV
+    with open(args.csv_output, mode="w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["Epoch", "Train Loss", "Train Accuracy", "Test Loss", "Test Accuracy", "Time per Epoch (s)", "Total Elapsed Time (s)"])
 
-        print(f'Epoch: {epoch + 1:02} | Epoch Time: {epoch_mins}m {epoch_secs}s')
+    total_start_time = time.time()
+
+    for epoch in range(N_EPOCHS):
+        epoch_start_time = time.time()
+        train_loss, train_acc = train(model, train_iterator, optimizer, criterion, device)
+        test_loss, test_acc = test(model, test_iterator, criterion, device)
+        epoch_end_time = time.time()
+        epoch_time = epoch_end_time - epoch_start_time
+        total_elapsed_time = epoch_end_time - total_start_time
+
+        print(f'Epoch: {epoch + 1:02} | Epoch Time: {epoch_time:.2f}s')
         print(f'\tTrain Loss: {train_loss:.3f} | Train Acc: {train_acc * 100:.2f}%')
-        print(f'\t Val. Loss: {valid_loss:.3f} |  Val. Acc: {valid_acc * 100:.2f}%')
+        print(f'\t Test Loss: {test_loss:.3f} |  Test Acc: {test_acc * 100:.2f}%')
+
+        # Write metrics to CSV
+        with open(args.csv_output, mode="a", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow([epoch + 1, train_loss, train_acc, test_loss, test_acc, epoch_time, total_elapsed_time])
 
 
 if __name__ == "__main__":
