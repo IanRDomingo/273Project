@@ -22,22 +22,22 @@ def set_seed(seed):
 
 
 class RNN(nn.Module):
-    def __init__(self, vocab_size, embedding_dim, num_filters, filter_sizes, output_dim, dropout, pad_idx):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, output_dim, n_layers, dropout, pad_idx):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)
-        self.convs = nn.ModuleList([
-            nn.Conv2d(in_channels=1, out_channels=num_filters, kernel_size=(fs, embedding_dim))
-            for fs in filter_sizes
-        ])
-        self.fc = nn.Linear(len(filter_sizes) * num_filters, output_dim)
+        self.rnn = nn.LSTM(embedding_dim, hidden_dim, num_layers=n_layers, dropout=dropout, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, text, text_lengths=None):
-        embedded = self.embedding(text).permute(1, 0, 2).unsqueeze(1)
-        conved = [torch.relu(conv(embedded)).squeeze(3) for conv in self.convs]
-        pooled = [torch.max(c, dim=2).values for c in conved]
-        cat = self.dropout(torch.cat(pooled, dim=1))
-        return self.fc(cat)
+    def forward(self, text, text_lengths):
+        # Text: (batch_size, seq_len)
+        embedded = self.dropout(self.embedding(text))  # Embedding layer with dropout
+        # Pack sequence for variable-length handling
+        packed_embedded = nn.utils.rnn.pack_padded_sequence(embedded, text_lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_output, (hidden, cell) = self.rnn(packed_embedded)
+        # Take the last hidden state from the final layer
+        hidden = self.dropout(hidden[-1])  # Last hidden state
+        return self.fc(hidden)
 
 
 def binary_accuracy(preds, y):
@@ -54,7 +54,7 @@ def train(model, iterator, optimizer, criterion, device):
     for batch in iterator:
         optimizer.zero_grad()
         text, text_lengths = batch.text
-        predictions = model(text).squeeze(1)
+        predictions = model(text, text_lengths).squeeze(1)
         loss = criterion(predictions, batch.label)
         acc = binary_accuracy(predictions, batch.label)
         loss.backward()
@@ -73,7 +73,7 @@ def test(model, iterator, criterion, device):
     with torch.no_grad():
         for batch in tqdm(iterator):
             text, text_lengths = batch.text
-            predictions = model(text).squeeze(1)
+            predictions = model(text, text_lengths).squeeze(1)
             loss = criterion(predictions, batch.label)
             acc = binary_accuracy(predictions, batch.label)
             epoch_loss += loss.item()
@@ -84,12 +84,12 @@ def test(model, iterator, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser(description='IMDB')
-    parser.add_argument("--epochs", required=False, default=100, type=int)
-    parser.add_argument("--lr", required=False, default=1e-4, type=float)
-    parser.add_argument("--batchsize", required=False, default=256, type=int)
-    parser.add_argument("--seed", required=False, default=42, type=int)
+    parser.add_argument("--epochs", default=100, type=int)
+    parser.add_argument("--lr", default=1e-4, type=float)
+    parser.add_argument("--batchsize", default=64, type=int)
+    parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--csv_output", default="rnn_metrics.csv", type=str)
-    parser.add_argument('--gpu', default='2', type=int)
+    parser.add_argument("--gpu", default=2, type=int)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -116,13 +116,13 @@ def main():
 
     INPUT_DIM = len(TEXT.vocab)
     EMBEDDING_DIM = 100
+    HIDDEN_DIM = 256
     OUTPUT_DIM = 1
-    NUM_FILTERS = 100
-    FILTER_SIZES = [3, 4, 5]
+    N_LAYERS = 2
     DROPOUT = 0.5
     PAD_IDX = TEXT.vocab.stoi[TEXT.pad_token]
 
-    model = RNN(INPUT_DIM, EMBEDDING_DIM, NUM_FILTERS, FILTER_SIZES, OUTPUT_DIM, DROPOUT, PAD_IDX)
+    model = RNN(INPUT_DIM, EMBEDDING_DIM, HIDDEN_DIM, OUTPUT_DIM, N_LAYERS, DROPOUT, PAD_IDX)
     pretrained_embeddings = TEXT.vocab.vectors
     model.embedding.weight.data.copy_(pretrained_embeddings)
 
@@ -136,8 +136,6 @@ def main():
     model = model.to(device)
     criterion = criterion.to(device)
 
-    N_EPOCHS = args.epochs
-
     # Initialize CSV
     with open(args.csv_output, mode="w", newline="") as file:
         writer = csv.writer(file)
@@ -145,7 +143,7 @@ def main():
 
     total_start_time = time.time()
 
-    for epoch in range(N_EPOCHS):
+    for epoch in range(args.epochs):
         epoch_start_time = time.time()
         train_loss, train_acc = train(model, train_iterator, optimizer, criterion, device)
         test_loss, test_acc = test(model, test_iterator, criterion, device)
@@ -153,9 +151,9 @@ def main():
         epoch_time = epoch_end_time - epoch_start_time
         total_elapsed_time = epoch_end_time - total_start_time
 
-        print(f'Epoch: {epoch + 1:02} | Epoch Time: {epoch_time:.2f}s')
-        print(f'\tTrain Loss: {train_loss:.3f} | Train Acc: {train_acc * 100:.2f}%')
-        print(f'\t Test Loss: {test_loss:.3f} |  Test Acc: {test_acc * 100:.2f}%')
+        print(f"Epoch: {epoch + 1}")
+        print(f"\tTrain Loss: {train_loss:.3f} | Train Acc: {train_acc * 100:.2f}%")
+        print(f"\t Test Loss: {test_loss:.3f} |  Test Acc: {test_acc * 100:.2f}%")
 
         # Write metrics to CSV
         with open(args.csv_output, mode="a", newline="") as file:
